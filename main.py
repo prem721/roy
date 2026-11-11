@@ -87,6 +87,9 @@ dissolved_oxygen = 0.0
 mode = "AUTO"
 aerator_state = "OFF"
 
+mock_do_enabled = False
+mock_do_value = 6.0
+
 
 # --------------------------------------------------
 # Request models
@@ -103,6 +106,11 @@ class ModeRequest(BaseModel):
 
 class AeratorRequest(BaseModel):
     state: str
+
+
+class MockDORequest(BaseModel):
+    enabled: bool
+    dissolved_oxygen: float = 6.0
 
 
 # --------------------------------------------------
@@ -138,15 +146,15 @@ def update_auto_aerator():
     if mode != "AUTO":
         return
 
-    # DO too low -> turn aerator ON
+    # Model predicts aeration required (< DO_LOW_THRESHOLD) -> turn aerator ON
     if dissolved_oxygen < DO_LOW_THRESHOLD:
 
         if aerator_state != "ON":
             aerator_state = "ON"
 
             logger.info(
-                f"AUTO: DO={dissolved_oxygen:.2f} "
-                f"< {DO_LOW_THRESHOLD} -> Aerator ON"
+                f"AUTO: Model predicted DO={dissolved_oxygen:.2f} "
+                f"< {DO_LOW_THRESHOLD} -> Model commanded Aerator ON"
             )
 
     # DO recovered -> turn aerator OFF
@@ -193,11 +201,14 @@ def receive_sensor_data(data: SensorData):
     temperature = data.temperature
     turbidity = data.turbidity
 
-    # Predict dissolved oxygen
-    dissolved_oxygen = predict_dissolved_oxygen(
-        temperature,
-        turbidity
-    )
+    # Predict dissolved oxygen (unless mock DO override is active)
+    if mock_do_enabled:
+        dissolved_oxygen = mock_do_value
+    else:
+        dissolved_oxygen = predict_dissolved_oxygen(
+            temperature,
+            turbidity
+        )
 
     # If AUTO mode, update aerator
     update_auto_aerator()
@@ -207,7 +218,8 @@ def receive_sensor_data(data: SensorData):
         f"| Turbidity={turbidity:.2f} "
         f"| Predicted DO={dissolved_oxygen:.2f} "
         f"| Mode={mode} "
-        f"| Aerator={aerator_state}"
+        f"| Aerator={aerator_state} "
+        f"| MockDO={mock_do_enabled}"
     )
 
     return {
@@ -215,7 +227,8 @@ def receive_sensor_data(data: SensorData):
         "turbidity": turbidity,
         "dissolved_oxygen": dissolved_oxygen,
         "mode": mode,
-        "aerator_state": aerator_state
+        "aerator_state": aerator_state,
+        "mock_do_enabled": mock_do_enabled
     }
 
 
@@ -232,7 +245,8 @@ def get_data():
         "turbidity": turbidity,
         "dissolved_oxygen": dissolved_oxygen,
         "mode": mode,
-        "aerator_state": aerator_state
+        "aerator_state": aerator_state,
+        "mock_do_enabled": mock_do_enabled
     }
 
 
@@ -318,3 +332,43 @@ def manual_aerator_control(data: AeratorRequest):
         "mode": mode,
         "state": aerator_state
     }
+
+
+# --------------------------------------------------
+# Frontend -> Backend
+# Mock DO Mode Simulation Override
+# --------------------------------------------------
+
+@app.post("/api/mock/do")
+def set_mock_do(data: MockDORequest):
+
+    global mock_do_enabled
+    global mock_do_value
+    global dissolved_oxygen
+
+    mock_do_enabled = data.enabled
+
+    if mock_do_enabled:
+        mock_do_value = float(data.dissolved_oxygen)
+        dissolved_oxygen = mock_do_value
+        logger.info(
+            f"MOCK DO OVERRIDE ACTIVATED: DO set to {dissolved_oxygen:.2f} mg/L"
+        )
+    else:
+        dissolved_oxygen = predict_dissolved_oxygen(
+            temperature,
+            turbidity
+        )
+        logger.info(
+            f"MOCK DO OVERRIDE DEACTIVATED: DO reverted to {dissolved_oxygen:.2f} mg/L"
+        )
+
+    # Re-evaluate automatic aerator hysteresis with the new DO value
+    update_auto_aerator()
+
+    return {
+        "mock_do_enabled": mock_do_enabled,
+        "dissolved_oxygen": dissolved_oxygen,
+        "mode": mode,
+        "aerator_state": aerator_state
+    }
